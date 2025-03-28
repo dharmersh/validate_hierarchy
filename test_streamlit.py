@@ -1,7 +1,13 @@
 import streamlit as st
 import pandas as pd
 import os
-from validator import ParentChildValidator  # Import your existing validator
+import sys
+from validator import ParentChildValidator
+
+# Workaround for Streamlit-PyTorch conflict
+if 'streamlit' in sys.modules:
+    import torch
+    torch.classes.__path__ = []  # Disable problematic PyTorch class inspection
 
 # Set page config
 st.set_page_config(
@@ -10,24 +16,14 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS for better styling
+# Custom CSS
 st.markdown("""
 <style>
-    .st-emotion-cache-1v0mbdj {
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
     .header-style {
         font-size: 24px;
         font-weight: bold;
         color: #2c3e50;
         margin-bottom: 20px;
-    }
-    .subheader-style {
-        font-size: 18px;
-        font-weight: bold;
-        color: #3498db;
-        margin-top: 20px;
     }
     .metric-box {
         background-color: #f8f9fa;
@@ -36,144 +32,135 @@ st.markdown("""
         margin-bottom: 20px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
+    .stDataFrame {
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .root-container {
+        background-color: #f9f9f9;
+        border-radius: 10px;
+        padding: 15px;
+        margin-bottom: 20px;
+        border-left: 4px solid #4a90e2;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 def load_data():
-    """Load validation data using your existing validator"""
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_PATH = os.path.join(BASE_DIR, 'data', 'input.json')
-    EMBEDDINGS_PATH = os.path.join(BASE_DIR, 'embeddings', 'embeddings.pkl')
-    
-    validator = ParentChildValidator(
-        data_path=DATA_PATH,
-        embeddings_path=EMBEDDINGS_PATH
-    )
-    return validator.validate_relationships()
+    """Load validation data with error handling"""
+    try:
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        DATA_PATH = os.path.join(BASE_DIR, 'data', 'input.json')
+        EMBEDDINGS_PATH = os.path.join(BASE_DIR, 'embeddings', 'embeddings.pkl')
+        
+        validator = ParentChildValidator(
+            data_path=DATA_PATH,
+            embeddings_path=EMBEDDINGS_PATH
+        )
+        return validator.validate_relationships()
+    except Exception as e:
+        st.error(f"Failed to load data: {str(e)}")
+        return []
 
-def prepare_report_data(results):
-    """Prepare data for the Streamlit report"""
-    old_relationships = []
-    new_suggestions = []
+def prepare_data(results, min_score=0.6):
+    """Prepare data with minimum score filtering"""
+    current = []
+    suggestions = []
     
     for result in results:
-        # Old relationship data
-        old_relationships.append({
+        # Current relationship
+        current.append({
             'Root Key': result['root_key'],
             'Root Name': result['root_name'],
             'Current Parent': result['current_parent']['parent_name'],
-            'Similarity Score': result['current_parent']['similarity_score'],
-            'Validation': result['validation']
+            'Score': result['current_parent']['similarity_score'],
+            'Status': result['validation']
         })
         
-        # New suggestions data
+        # Suggested improvements (filtered by min_score)
         for suggestion in result['suggested_parents']:
-            new_suggestions.append({
-                'Root Key': result['root_key'],
-                'Root Name': result['root_name'],
-                'Current Parent': result['current_parent']['parent_name'],
-                'Suggested Parent': suggestion['parent_name'],
-                'Similarity Score': suggestion['similarity_score'],
-                'Improvement': suggestion['similarity_score'] - result['current_parent']['similarity_score']
-            })
+            if suggestion['similarity_score'] >= min_score:
+                suggestions.append({
+                    'Root Key': result['root_key'],
+                    'Root Name': result['root_name'],
+                    'Current Parent': result['current_parent']['parent_name'],
+                    'Current Score': result['current_parent']['similarity_score'],
+                    'Suggested Parent': suggestion['parent_name'],
+                    'New Score': suggestion['similarity_score'],
+                    'Improvement': suggestion['similarity_score'] - result['current_parent']['similarity_score']
+                })
     
-    return pd.DataFrame(old_relationships), pd.DataFrame(new_suggestions)
+    return pd.DataFrame(current), pd.DataFrame(suggestions)
 
-def display_metrics(old_df, new_df):
-    """Display summary metrics"""
-    st.markdown('<div class="header-style">Validation Summary</div>', unsafe_allow_html=True)
+def display_suggestions(suggestions_df):
+    """Display all roots with their qualified suggestions"""
+    st.markdown('<div class="header-style">Improvement Suggestions (Score > 60%)</div>', unsafe_allow_html=True)
     
-    col1, col2, col3 = st.columns(3)
+    if suggestions_df.empty:
+        st.info("No qualified improvement suggestions found (minimum 60% score)")
+        return
     
-    with col1:
-        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-        st.metric("Total Relationships", len(old_df))
-        st.markdown('</div>', unsafe_allow_html=True)
+    # Group by root to show all suggestions together
+    grouped = suggestions_df.groupby('Root Name')
     
-    with col2:
-        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-        passed = len(old_df[old_df['Validation'] == 'VALID'])
-        st.metric("Valid Relationships", f"{passed} ({(passed/len(old_df))*100:.1f}%)")
-        st.markdown('</div>', unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown('<div class="metric-box">', unsafe_allow_html=True)
-        avg_improvement = new_df['Improvement'].mean() if not new_df.empty else 0
-        st.metric("Avg. Improvement Possible", f"{avg_improvement:.2f}")
-        st.markdown('</div>', unsafe_allow_html=True)
+    for root_name, group in grouped:
+        with st.container():
+            st.markdown(f"""
+            <div class="root-container">
+                <h3>{root_name}</h3>
+                <p><strong>Current Parent:</strong> {group['Current Parent'].iloc[0]} (Score: {group['Current Score'].iloc[0]:.2f})</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Display all suggestions for this root
+            st.dataframe(
+                group[[
+                    'Suggested Parent',
+                    'New Score',
+                    'Improvement'
+                ]].sort_values('New Score', ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.markdown("---")
 
 def main():
     st.title("Hierarchy Relationship Validator")
-    st.markdown("Analyze and improve parent-child relationships in your hierarchy")
     
-    # Load data
-    with st.spinner("Loading and validating relationships..."):
+    # Load data with minimum 60% score filter
+    with st.spinner("Analyzing relationships..."):
         results = load_data()
-        old_df, new_df = prepare_report_data(results)
+        if not results:
+            st.stop()
+        
+        current_df, suggestions_df = prepare_data(results, min_score=0.6)
     
-    # Display metrics
-    display_metrics(old_df, new_df)
+    # Metrics
+    st.markdown('<div class="header-style">Validation Summary</div>', unsafe_allow_html=True)
     
-    # Section 1: Current Relationships
-    st.markdown('<div class="subheader-style">Current Relationships</div>', unsafe_allow_html=True)
-    
-    # Filter options
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        validation_filter = st.selectbox(
-            "Filter by Validation Status",
-            ["All", "VALID", "INVALID"]
-        )
-    
+        st.metric("Total Relationships", len(current_df))
     with col2:
-        score_threshold = st.slider(
-            "Minimum Similarity Score",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.0,
-            step=0.05
-        )
+        valid = len(current_df[current_df['Status'] == 'VALID'])
+        st.metric("Valid", f"{valid} ({valid/len(current_df)*100:.1f}%)")
+    with col3:
+        qualified = len(suggestions_df['Root Name'].unique())
+        st.metric("Roots with Improvements", qualified)
     
-    # Apply filters
-    filtered_old = old_df.copy()
-    if validation_filter != "All":
-        filtered_old = filtered_old[filtered_old['Validation'] == validation_filter]
-    filtered_old = filtered_old[filtered_old['Similarity Score'] >= score_threshold]
+    # Current relationships
+    st.markdown('<div class="header-style">Current Relationships</div>', unsafe_allow_html=True)
     
     # Display current relationships
     st.dataframe(
-        filtered_old.sort_values('Similarity Score', ascending=False),
+        current_df.sort_values('Score', ascending=False),
         use_container_width=True,
         height=400
     )
     
-    # Section 2: Improvement Suggestions
-    st.markdown('<div class="subheader-style">Improvement Suggestions</div>', unsafe_allow_html=True)
-    
-    if not new_df.empty:
-        # Sort by improvement potential
-        new_df = new_df.sort_values('Improvement', ascending=False)
-        
-        # Display suggestions
-        st.dataframe(
-            new_df,
-            use_container_width=True,
-            height=400
-        )
-        
-        # Visualizations
-        st.markdown('<div class="subheader-style">Improvement Analysis</div>', unsafe_allow_html=True)
-        
-        tab1, tab2 = st.tabs(["Score Distribution", "Top Improvements"])
-        
-        with tab1:
-            st.bar_chart(new_df, x="Suggested Parent", y="Improvement")
-        
-        with tab2:
-            top_improvements = new_df.head(10)
-            st.bar_chart(top_improvements, x="Root Name", y=["Similarity Score", "Improvement"])
-    else:
-        st.info("No improvement suggestions available")
+    # Improvement suggestions section
+    display_suggestions(suggestions_df)
 
 if __name__ == "__main__":
     main()
